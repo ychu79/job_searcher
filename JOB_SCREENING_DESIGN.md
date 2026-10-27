@@ -1,6 +1,6 @@
 # Personal New-Grad Software Engineering Job Screening Workflow
 
-Session design summary, compiled October 26, 2026.
+Session design summary, updated October 26, 2026.
 
 This document records the decisions and proposals discussed in this chat. It is a design document, not an implementation or an instruction to begin screening. No code, account connections, scheduling, or job screening has been requested as part of saving this document.
 
@@ -13,7 +13,8 @@ The user prioritizes:
 - Simple setup and an easy manual start.
 - Finding more potentially suitable jobs over strict accuracy.
 - Excluding explicit sponsorship refusals and explicit citizenship or security-clearance requirements.
-- Avoiding repeated screening of the same company and URL-derived posting ID.
+- Collecting only postings marked as posted today on the GitHub sources.
+- Recording every collected encounter while avoiding repeated screening of the same job identity.
 - Isolating each posting's review so details from previous jobs do not accumulate in the reviewer's context.
 
 The initial geographic scope is U.S. jobs, with an explicit exception: retain remote jobs regardless of country, subject to the other screening rules.
@@ -37,6 +38,20 @@ Observations from the source inspection during this conversation, which may chan
 - Jobright stated that its list covered only the last seven days. Its links led to Jobright pages, and its entries included internships and non-U.S. locations.
 
 Consequently, membership in a repository does not by itself establish eligibility or that applications remain open. Disappearance from a rolling list does not establish closure.
+
+### Agreed collection window: today only
+
+Every run, including the first, collects only listings marked as posted today on the GitHub source lists. The GitHub listing's displayed date or age controls collection; do not substitute the employer's posting date, first-seen date, or repository commit date.
+
+- Establish the run's date in `America/Los_Angeles` at startup and keep it fixed even if the run crosses midnight.
+- For explicit source dates, include only dates matching the run's date.
+- For relative ages, treat `0d` as today.
+- Log and exclude listings with missing or unrecognizable source dates rather than guessing.
+- Collect all matching listings from all three sources at the beginning of the run. There is no 50-posting collection limit.
+- Reading a source document containing older rows is fine; only today's rows enter the candidate collection and encounter history.
+- Record each source's retrieval time and whether collection succeeded. A retrieval failure must not be represented as a successful collection containing zero jobs.
+
+There is no initial backlog scan, missed-day catch-up, or historical recovery. The user explicitly accepts missing jobs that appear and disappear between runs. These decisions supersede the earlier recommendation to collect each full current list and let history alone determine eligibility for review.
 
 ## 3. Agreed screening rules
 
@@ -101,6 +116,8 @@ Do not exclude merely because:
 
 If a successfully read posting does not mention these restrictions, the user wants to assume no citizenship or clearance requirement and that sponsorship is available for screening purposes. Keep the role if it otherwise passes.
 
+Ambiguous restriction wording also remains eligible, with a note explaining the uncertainty. For example, a statement that the employer “may not be able” to support sponsorship is not treated as an unequivocal refusal. Keep the job if all other rules pass; this does not override an explicit requirement or refusal elsewhere in the target posting.
+
 The assistant recommended labeling this outcome “No restrictions found” rather than “Sponsorship confirmed.” That wording distinguishes the screening assumption from verified employer support; the final output wording has not been selected.
 
 ### 3.5 Open applications
@@ -115,13 +132,16 @@ A loading failure is not evidence that a job is open, closed, or free of restric
 
 Use only:
 
-**Company name + posting ID extracted from the employer posting URL**
+**Consistent company label + URL-derived identity**
+
+The identity is either a posting ID extracted from the employer URL or, when no ID can be extracted, the complete employer posting URL.
 
 - Same company and same ID: skip if already successfully screened.
 - Same company and different IDs: screen both, even if titles and descriptions are identical.
 - Different URL posting IDs represent different postings, even if they actually refer to the same underlying job or share an internal requisition ID.
 - Different companies and the same ID: screen both.
 - A previously screened pair that reappears with a new posting date or changed description: skip indefinitely.
+- Still record each encounter with a previously screened job; skip only the repeated description review, not the history write.
 
 Do not use title similarity, description similarity, or whole-URL similarity to discard postings. Extract the ID from the URL and compare the company/ID pair. The user explicitly rejected similarity-based matching because distinct positions can share wording.
 
@@ -143,77 +163,136 @@ During the discussion, Roblox's visible page displayed `46811`, while its URL co
 
 Extracting an ID does not mean screening succeeded. An inaccessible posting can have a known identity and still have the status `Could not check`.
 
-If a source uses an aggregator link, obtain the employer posting URL before extracting the identity; do not use the aggregator's record ID. The proposed behavior for an unfamiliar URL format or conflicting ID values is to report unresolved identity rather than guess. Exact conflict-handling rules remain to be decided.
+If a source uses an aggregator link, obtain the employer posting URL before extracting the identity; do not use the aggregator's record ID. Use the full-URL fallback for a format with no extractable ID. Conflicting job-ID components or an inability to obtain an employer URL should be reported rather than guessed; the exact handling of these cases remains to be decided.
+
+### Agreed fallback: complete URL
+
+When the employer URL has no extractable posting ID, use the company label plus that complete URL as the identity. The user accepted retaining the complete link instead of truncating it.
+
+- Do not truncate the identity: distinct postings can share a long URL prefix.
+- Do not substitute an ID from visible page text or structured metadata.
+- Distinguish extracted-ID identities from full-URL identities so the two types cannot collide accidentally.
+- Different full fallback URLs are different identities, including differences in tracking parameters. Do not silently introduce whole-URL normalization or similarity matching.
+- A shortened URL is acceptable for display only; retain the complete identity and original URL in storage.
+
+These postings can proceed through normal screening. A missing extracted ID is not by itself a failed or unrecognized posting once the full employer URL supplies its identity.
+
+### Agreed company naming
+
+Assign consistent company labels to recognized employer career sites or recruiting accounts, while retaining the displayed company name separately. This avoids treating source variants such as “Amazon” and “Amazon.com Services LLC” as different companies when they refer to the same configured employer account.
+
+Normalize capitalization and extra whitespace within those labels. Use explicit mappings rather than automatically merging parents, subsidiaries, or similar company names. For shared recruiting-platform domains, the employer account matters, not just the domain. The initial mappings and handling of unknown accounts remain implementation details to settle.
 
 ### Local database persistence
 
-The user clarified that the requirement is for the agent to save the results of scanned postings in a local database. A separately running HTTP API service is not required for this requirement. The database technology and access mechanism have not been selected.
+Persist job records, every collected encounter, and screening attempts in a local database. SQLite is the recommended engine for the single-machine workflow; it does not require a separately running database server. The exact schema, runtime, and database location are not implemented or finalized.
 
-The proposed division of responsibility remains: subagents return review results, and the main agent writes them to the local database and maintains the combined output. This avoids having multiple reviewers independently update shared records.
+Subagents return review results, and the main agent uses the local database interface to save them and maintain the combined output. Centralizing writes avoids having reviewers independently update shared records.
 
-Proposed record fields:
+### Agreed access approach: local operations documented in Markdown
+
+Provide a small local command-line interface backed by a database access layer. No running HTTP API service is needed. Each invocation can open the database, perform an operation, return a structured result, and exit.
+
+Markdown instructions should explain the operations, required inputs, response meanings, and error handling. Routine work should not require the agent to compose raw SQL. Identity validation, uniqueness, status transitions, and duplicate-save behavior belong in the interface and database constraints rather than relying only on the agent to remember rules.
+
+The operations discussed are:
+
+- Initialize or validate the database, according to the startup rules.
+- Record an encounter and check screening history.
+- Reserve an eligible job for one reviewer.
+- Save a completed screening and its supporting details.
+- Record an unsuccessful attempt and transition exhausted failures to manual review.
+- Inspect records for troubleshooting and export results for filtering.
+
+Proposed operation behavior:
+
+- A repeated save of an already completed identity preserves the existing screening result and reports that it was already screened.
+- Repeating a save after an uncertain response does not create duplicate results or silently overwrite history.
+- A failed lookup is a database error, never evidence that the job is new.
+- Removing a job from a displayed shortlist does not erase its screening history.
+- Corrections, resets, or deletion are explicit maintenance actions, not generic routine writes that bypass the skip rule.
+
+### Recording encounters separately from screening
+
+The user confirmed that every encounter should be recorded, including previously completed and failed jobs. This does not authorize repeatedly reviewing completed descriptions.
+
+The proposed data organization is:
+
+| Information | Purpose |
+| --- | --- |
+| Job record | One identity and its current work state and screening result. |
+| Appearance history | Each collected encounter, its run and source, source-displayed date, and whether review was skipped or scheduled. |
+| Screening attempts | Reviewer assignment, attempt times, success or failure, and supporting details. |
+
+Keep discovery history, work state, and screening outcome separate. A job can have been seen before but never successfully screened. Likewise, a repeated encounter can refer to either a kept or an excluded job. A single status such as “first scan/already scanned/unrecognized” cannot capture all of these combinations reliably.
+
+Illustrative job-record fields, subject to schema design:
 
 | Field | Purpose |
 | --- | --- |
 | `record_id` | Automatically generated internal primary key. |
 | `company_name` | Original company name for display and review. |
-| `company_key` | Company name normalized for capitalization and extra whitespace. |
-| `url_job_id` | Posting ID extracted exclusively from the employer posting URL. |
+| `company_key` | Consistent configured company label, normalized for capitalization and whitespace. |
+| `identity_kind` | Extracted URL posting ID or full-URL fallback. |
+| `identity_value` | Extracted posting ID or the complete fallback URL, stored as text. |
 | `posting_url` | Employer posting URL retained as evidence. |
 | `id_source` | URL component or extraction rule used, such as `/jobs/{id}` or `gh_jid`. |
 | `title`, `location` | Information read from the target posting. |
-| `screening_status` | Whether screening completed or could not be completed. |
+| `work_status` | Pending, assigned, completed, or awaiting manual review. |
 | `decision`, `reason` | Keep/exclude decision and supporting explanation when screening completes. |
 | `screened_at` | Completion date/time; unsuccessful attempts need a separate attempt timestamp. |
 
-The assistant recommended an internal generated primary key plus a unique constraint on `(company_key, url_job_id)`. A composite primary key was also discussed as a valid alternative; the exact database schema has not been explicitly approved.
+The recommended schema uses an internal generated primary key plus a unique constraint on `(company_key, identity_kind, identity_value)`. The identity kind accounts for the newly agreed full-URL fallback. The exact schema and primary-key implementation remain to be finalized.
 
-The skip check must require both a matching company/URL-ID pair and completed screening. Both kept and excluded decisions count as completed. The mere existence of a database row, an in-progress assignment, or a failed attempt must not count as successful screening.
+The completed-screening check requires both a matching identity and a completed result. Both kept and excluded decisions count as completed. An in-progress assignment or unsuccessful attempt does not count as successful screening, but each has its own reason to avoid launching another automatic reviewer.
 
-Proposed database operations are checking history, recording completed screenings, recording unsuccessful attempts, and exporting results. Removing a job from a shortlist should not erase its screening history. Any reset for intentional rescreening would be an explicit action, not routine behavior.
-
-### Proposed history handling
-
-- Persist history in the local database between runs.
-- Record both kept and excluded postings as successfully screened.
-- Keep unsuccessful reads separate from completed screening.
-- Have the main agent maintain the shared history and combined output.
-- Normalize company names only for capitalization and extra whitespace; do not automatically merge subsidiaries or company aliases.
-
-Local database persistence is agreed. The remaining handling details above were recommended, but not all were explicitly confirmed.
-
-### Unresolved: no extractable URL posting ID
-
-How to handle a posting whose employer URL does not expose a usable job ID remains unresolved. The URL-only decision rules out using a page-body or metadata ID instead.
-
-The proposed default is to retain it as an unresolved record or in a separate review list without deduplicating it. This can produce repeated entries across runs. The user has not approved this default. Do not invent an ID, use the entire URL as a replacement key, or treat all missing-ID records for a company as duplicates.
+Completed identities are skipped indefinitely. Jobs awaiting manual review after exhausted reading attempts are also skipped automatically until the user explicitly requests another attempt. In both cases, save new appearances and preserve the existing result or failure record.
 
 ## 5. Agent workflow and context isolation
 
 The user prefers a subagent for each posting because a single long-running reviewer could retain irrelevant details from earlier jobs.
 
-The proposed design is:
+The agreed run flow is:
 
-1. The main agent collects candidate links from the three sources.
-2. It extracts posting IDs from employer URLs and checks company/ID pairs against the local database where identity is available.
-3. It assigns each remaining posting to a fresh subagent, with limited concurrency.
-4. The subagent reads the employer posting and applies the same screening rules.
-5. The subagent returns a compact result rather than the full page.
-6. The main agent records the result in the local database and updates the combined output.
+1. Validate startup readiness and fix the run's date in `America/Los_Angeles`.
+2. Collect all listings marked today on the three GitHub sources; do not collect an older backlog.
+3. Record every collected encounter, establish its company and URL identity, and check history.
+4. Skip repeated review of completed jobs and jobs awaiting manual review. Do not duplicate an active assignment.
+5. Queue eligible new postings and run up to three fresh reviewers concurrently, one posting per reviewer.
+6. Each reviewer reads its target employer posting and returns a compact decision with supporting details.
+7. Save each result immediately as it finishes; continue through the eligible queue and prepare output for filtering.
 
-If an employer URL becomes available only after resolving a source link, extract its ID and check history at that point before completing a redundant review. Do not derive identity from the page body. The main agent should also avoid assigning the same known company/ID pair twice within a run.
+If an employer URL becomes available only after resolving a source link, derive the identity and check history at that point before completing a redundant review. Do not derive identity from the page body. Persist discovery information even if the employer link cannot be resolved; do not invent a completed screening.
+
+### Collection size versus concurrency
+
+Collect all of today's source-listed postings at the beginning of the run. There is no 50-job total or batch checkpoint requirement. Limit active reviewers to three, replacing each finished reviewer with a fresh reviewer for another queued posting. All new eligible postings can be processed in that run, subject to interruptions or execution limits.
+
+Saving completed results immediately allows later work to avoid repeating completed reviews. It does not change the today-only collection policy or automatically authorize collecting an older backlog. The treatment of unfinished pending work after the run date changes remains an open question.
+
+### Proposed persistent work queue
+
+A cursor alone is insufficient because the same identity can appear in multiple sources and work can be interrupted. The recommended local interface records an assignment before launching a reviewer:
+
+- Check eligibility and reserve the job in one atomic database operation.
+- Record the assigned reviewer and run, then finish the transaction before browsing begins.
+- Other assignment requests for the same active identity return that it is already assigned.
+- Save a result against the corresponding assignment and clear or finish that assignment consistently.
+- For interrupted work, confirm the previous reviewer has stopped before reassigning it. A timeout alone should not launch overlapping reviewers.
+
+The exact reservation and recovery fields remain implementation details. A cursor may be useful for source traversal or progress display, but it is not the protection against duplicate assignments.
 
 ### Proposed subagent contract
 
 - Start without inheriting the parent's conversation history, where the available delegation tools support this.
 - Receive the rules or their local file path and one target posting URL.
 - Review one posting only; do not reuse that thread for subsequent postings.
-- Return company, URL-derived posting ID if available, title, location, employer URL, decision, and a short supporting reason.
+- Return company, URL identity and its kind, title, location, employer URL, decision, and a short supporting reason.
 - Use distinct outcomes such as `Keep`, `Exclude`, and `Could not check`.
 - Return evidence for exclusions and describe failed or incomplete reads.
 - Let the main agent write the combined results to avoid conflicting edits.
 
-The goal is separate review context. Subagents do not automatically guarantee accuracy or isolation from shared files, and their creation may inherit history unless explicitly configured otherwise. The exact concurrency limit has not been chosen.
+The goal is separate review context. Subagents do not automatically guarantee accuracy or isolation from shared files, and their creation may inherit history unless explicitly configured otherwise. The initial reviewer concurrency limit is three.
 
 Subagents add model/tool usage and coordination overhead. The user prefers simplicity and context isolation; cost and time targets have not been set.
 
@@ -242,7 +321,7 @@ Separate subagents address cross-posting context accumulation; these page-bounda
 
 The user approved **one retry** after a failed reading attempt.
 
-The proposed interpretation is one additional attempt for a temporary failure. After that, record `Could not check` and continue. A failed read must not trigger the assumption that restrictions are absent.
+Allow one additional attempt for a temporary reading failure. If both attempts fail, record `Could not check`, move the job to manual review, and continue. A failed read must not trigger the assumption that restrictions are absent.
 
 Website access discussion distinguished:
 
@@ -254,7 +333,7 @@ There is no universal “AI access” switch. Training crawlers, search crawlers
 
 The assistant recommended permitted official feeds/APIs or accessible employer postings when available, otherwise manual review. It did not propose bypassing explicit access restrictions. Using a browser to render JavaScript is distinct from changing tools to evade a denial.
 
-The treatment of failed attempts on future runs remains unresolved; the one-retry decision does not establish whether to retry again on a later day.
+Do not automatically retry those jobs on future runs. Record later collected encounters, preserve the failed-attempt history, and wait for an explicit user request to attempt them again.
 
 ## 8. Starting the workflow
 
@@ -264,9 +343,24 @@ The proposed organization is:
 
 - A short `AGENTS.md` that directs Codex to the workflow and requests delegation.
 - A detailed Markdown rules file.
+- Markdown startup instructions and a reference for the local database operations.
 - A local database for persistent screening history and files for exported results.
 
 These files are proposals; this summary does not create or activate that setup.
+
+### Startup and initialization
+
+With the recommended SQLite engine there is no database server to start. The startup instructions should distinguish first-use initialization from validation of existing history:
+
+1. Locate the project and its designated database path.
+2. Verify that the local database interface and required runtime are available.
+3. On first use, initialize the database and required tables without destroying existing data.
+4. On later runs, verify that the expected database and tables are usable.
+5. Start collection and screening only after these checks succeed.
+
+A missing database after initial setup must not silently become a new empty database: a wrong path would make all jobs appear unseen. Initialization must preserve existing history. If database validation, lookup, or persistence fails, report the error and stop the affected workflow rather than treating it as empty history or claiming that a result was saved.
+
+Markdown explains the process; the local interface should enforce the data rules. No database or startup interface has been created yet.
 
 In a Codex session already using ChatGPT sign-in, an interactive workflow can use that existing access rather than a separately configured OpenAI API application. Available tools, permissions, usage limits, and website accessibility still apply. Markdown instructions do not install missing tools or enable inaccessible services.
 
@@ -289,23 +383,25 @@ Suggested shortlist columns, not yet finalized:
 
 - Company
 - Job ID
+- Identity kind, so full-URL fallback records can be distinguished
 - Title
 - Location
 - Employer application URL
 - Screening note
 - Checked date
 
-Internal history should retain decisions for rejected jobs as well. Whether to expose separate excluded and unreadable lists, preserve application notes, append rows, or produce a fresh output file remains undecided. Scheduling is also deferred.
+Retain rejected decisions, unreadable attempts, and repeated encounters in the database so results can later be filtered. Keep ambiguous restriction statements in the shortlist with notes when other rules pass. The exact presentation of encounter status, excluded and unreadable lists, application notes, and append/replace behavior remains undecided. Scheduling is also deferred.
 
 ## 10. Remaining decisions
 
-1. What to do when no posting ID can be extracted from the employer URL, or URL ID components conflict.
-2. Whether to retry previously unreadable postings on later runs.
-3. Final output format, columns, and Google Sheets transfer method.
-4. Output append/replace behavior and any application-tracking fields.
-5. Exact tool setup for retrieving employer postings and handling necessary browser rendering.
-6. Subagent concurrency and any per-posting effort limit beyond the agreed one retry.
-7. Local database technology, exact schema, access mechanism, and company-name normalization details.
+1. Exact database schema, location, runtime, and local command interface; SQLite is the recommended engine.
+2. Initial company/account mappings and handling of unknown company labels, conflicting URL ID components, or unresolved employer links.
+3. Queue recovery details, any per-posting effort limit beyond one reading retry, and whether unfinished work from a prior date may be resumed under the today-only policy.
+4. Final output format, columns, filters, and Google Sheets transfer method.
+5. Output append/replace behavior and any application-tracking fields.
+6. Exact tool setup for retrieving employer postings and handling necessary browser rendering.
+
+Resolved since the previous revision: full-URL fallback without truncation; consistent company mappings; recording every encounter without repeating completed screening; manual review after exhausted failures; retaining ambiguous restriction wording; today-only collection on every run; and three concurrent reviewers without a 50-job collection cap.
 
 No graduation date, personal work-authorization timeline, or broader experience-based eligibility filter was established. The agreed title and explicit-restriction rules govern the intended first version.
 
@@ -322,3 +418,7 @@ These links supported the discussion; they have not been revalidated as part of 
 - [Robots Exclusion Protocol, RFC 9309](https://www.rfc-editor.org/rfc/rfc9309.html)
 - [Google Workspace credentials](https://developers.google.com/workspace/guides/create-credentials)
 - [Import TSV and other files into Google Sheets](https://support.google.com/docs/answer/40608?hl=en)
+- [SQLite initialization and serverless operation](https://www.sqlite.org/zeroconf.html)
+- [Appropriate uses for SQLite](https://www.sqlite.org/whentouse.html)
+- [SQLite transactions](https://www.sqlite.org/lang_transaction.html)
+- [SQLite isolation](https://www.sqlite.org/isolation.html)
