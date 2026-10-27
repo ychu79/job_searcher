@@ -13,7 +13,7 @@ The user prioritizes:
 - Simple setup and an easy manual start.
 - Finding more potentially suitable jobs over strict accuracy.
 - Excluding explicit sponsorship refusals and explicit citizenship or security-clearance requirements.
-- Avoiding repeated screening of the same employer job ID.
+- Avoiding repeated screening of the same company and URL-derived posting ID.
 - Isolating each posting's review so details from previous jobs do not accumulate in the reviewer's context.
 
 The initial geographic scope is U.S. jobs, with an explicit exception: retain remote jobs regardless of country, subject to the other screening rules.
@@ -115,32 +115,78 @@ A loading failure is not evidence that a job is open, closed, or free of restric
 
 Use only:
 
-**Company name + employer job ID**
+**Company name + posting ID extracted from the employer posting URL**
 
 - Same company and same ID: skip if already successfully screened.
 - Same company and different IDs: screen both, even if titles and descriptions are identical.
+- Different URL posting IDs represent different postings, even if they actually refer to the same underlying job or share an internal requisition ID.
 - Different companies and the same ID: screen both.
 - A previously screened pair that reappears with a new posting date or changed description: skip indefinitely.
 
-Do not use title similarity, description similarity, or URL similarity to discard postings. The user explicitly rejected these alternatives because distinct positions can share wording.
+Do not use title similarity, description similarity, or whole-URL similarity to discard postings. Extract the ID from the URL and compare the company/ID pair. The user explicitly rejected similarity-based matching because distinct positions can share wording.
 
-An employer job ID may appear in the URL, page text, or structured job metadata. Formats differ across employers. Do not substitute an aggregator's record ID or invent an ID when none is established.
+### Agreed ID extraction: URL only
+
+Use only the employer career-site or employer-linked recruiting-platform URL to extract the posting ID. Do not use visible page IDs or structured job metadata as a fallback or to override the URL ID. This supersedes the earlier proposal to inspect page text or metadata for identity.
+
+Use a site-specific URL rule: a designated path segment or explicitly named job-ID parameter. Do not simply select any number in a URL. Store the extracted ID as text, preserving prefixes and leading zeros.
+
+The examples discussed are:
+
+| Company | Employer posting URL | URL-derived posting ID | Extraction rule |
+| --- | --- | --- | --- |
+| Roblox | [Example posting](https://careers.roblox.com/jobs/8261393?gh_jid=8261393) | `8261393` | Segment after `/jobs/`; `gh_jid` contains the same value in this example. |
+| Amazon | [Example posting](https://www.amazon.jobs/en/jobs/10586548/jr-software-development-engineer-detroit-mi-jr-developer-program) | `10586548` | Segment immediately after `/jobs/`. |
+| Microsoft | [Example posting](https://apply.careers.microsoft.com/careers/job/1970393556923390) | `1970393556923390` | Segment immediately after `/careers/job/`. |
+
+During the discussion, Roblox's visible page displayed `46811`, while its URL contained `8261393`. Under the agreed rule, use `8261393`; the visible ID does not affect deduplication. Amazon's visible ID matched its URL ID. Microsoft's page could not be retrieved, including one retry, but its URL still supplied an identifiable posting ID.
+
+Extracting an ID does not mean screening succeeded. An inaccessible posting can have a known identity and still have the status `Could not check`.
+
+If a source uses an aggregator link, obtain the employer posting URL before extracting the identity; do not use the aggregator's record ID. The proposed behavior for an unfamiliar URL format or conflicting ID values is to report unresolved identity rather than guess. Exact conflict-handling rules remain to be decided.
+
+### Local database persistence
+
+The user clarified that the requirement is for the agent to save the results of scanned postings in a local database. A separately running HTTP API service is not required for this requirement. The database technology and access mechanism have not been selected.
+
+The proposed division of responsibility remains: subagents return review results, and the main agent writes them to the local database and maintains the combined output. This avoids having multiple reviewers independently update shared records.
+
+Proposed record fields:
+
+| Field | Purpose |
+| --- | --- |
+| `record_id` | Automatically generated internal primary key. |
+| `company_name` | Original company name for display and review. |
+| `company_key` | Company name normalized for capitalization and extra whitespace. |
+| `url_job_id` | Posting ID extracted exclusively from the employer posting URL. |
+| `posting_url` | Employer posting URL retained as evidence. |
+| `id_source` | URL component or extraction rule used, such as `/jobs/{id}` or `gh_jid`. |
+| `title`, `location` | Information read from the target posting. |
+| `screening_status` | Whether screening completed or could not be completed. |
+| `decision`, `reason` | Keep/exclude decision and supporting explanation when screening completes. |
+| `screened_at` | Completion date/time; unsuccessful attempts need a separate attempt timestamp. |
+
+The assistant recommended an internal generated primary key plus a unique constraint on `(company_key, url_job_id)`. A composite primary key was also discussed as a valid alternative; the exact database schema has not been explicitly approved.
+
+The skip check must require both a matching company/URL-ID pair and completed screening. Both kept and excluded decisions count as completed. The mere existence of a database row, an in-progress assignment, or a failed attempt must not count as successful screening.
+
+Proposed database operations are checking history, recording completed screenings, recording unsuccessful attempts, and exporting results. Removing a job from a shortlist should not erase its screening history. Any reset for intentional rescreening would be an explicit action, not routine behavior.
 
 ### Proposed history handling
 
-- Persist history locally between runs.
+- Persist history in the local database between runs.
 - Record both kept and excluded postings as successfully screened.
 - Keep unsuccessful reads separate from completed screening.
 - Have the main agent maintain the shared history and combined output.
 - Normalize company names only for capitalization and extra whitespace; do not automatically merge subsidiaries or company aliases.
 
-These handling details were recommended, but not all were explicitly confirmed.
+Local database persistence is agreed. The remaining handling details above were recommended, but not all were explicitly confirmed.
 
-### Unresolved: no employer job ID
+### Unresolved: no extractable URL posting ID
 
-The last unanswered question in the discussion was how to handle a posting with no identifiable employer job ID.
+How to handle a posting whose employer URL does not expose a usable job ID remains unresolved. The URL-only decision rules out using a page-body or metadata ID instead.
 
-The proposed default is to retain it in a separate review list without deduplicating it. This can produce repeated entries across runs. The user has not approved this default, and URL-based deduplication must not be silently substituted.
+The proposed default is to retain it as an unresolved record or in a separate review list without deduplicating it. This can produce repeated entries across runs. The user has not approved this default. Do not invent an ID, use the entire URL as a replacement key, or treat all missing-ID records for a company as duplicates.
 
 ## 5. Agent workflow and context isolation
 
@@ -149,20 +195,20 @@ The user prefers a subagent for each posting because a single long-running revie
 The proposed design is:
 
 1. The main agent collects candidate links from the three sources.
-2. It checks known company/ID pairs against local screening history where identity is available.
+2. It extracts posting IDs from employer URLs and checks company/ID pairs against the local database where identity is available.
 3. It assigns each remaining posting to a fresh subagent, with limited concurrency.
 4. The subagent reads the employer posting and applies the same screening rules.
 5. The subagent returns a compact result rather than the full page.
-6. The main agent records the result and updates history.
+6. The main agent records the result in the local database and updates the combined output.
 
-If identity becomes available only after opening the employer page, check history at that point before completing a redundant review.
+If an employer URL becomes available only after resolving a source link, extract its ID and check history at that point before completing a redundant review. Do not derive identity from the page body. The main agent should also avoid assigning the same known company/ID pair twice within a run.
 
 ### Proposed subagent contract
 
 - Start without inheriting the parent's conversation history, where the available delegation tools support this.
 - Receive the rules or their local file path and one target posting URL.
 - Review one posting only; do not reuse that thread for subsequent postings.
-- Return company, employer job ID if found, title, location, employer URL, decision, and a short supporting reason.
+- Return company, URL-derived posting ID if available, title, location, employer URL, decision, and a short supporting reason.
 - Use distinct outcomes such as `Keep`, `Exclude`, and `Could not check`.
 - Return evidence for exclusions and describe failed or incomplete reads.
 - Let the main agent write the combined results to avoid conflicting edits.
@@ -175,7 +221,7 @@ Subagents add model/tool usage and coordination overhead. The user prefers simpl
 
 Options discussed were AI review of each full posting, deterministic pre-checks followed by AI review, and AI review of keyword excerpts only.
 
-The recommended starting approach is AI review of the complete relevant job description, with lightweight identity/title checks where practical. Excerpt-only review was discouraged because it can omit restrictions or necessary context. No extraction method or code architecture has been selected.
+The recommended starting approach is AI review of the complete relevant job description, with lightweight identity/title checks where practical. Excerpt-only review was discouraged because it can omit restrictions or necessary context. URL-only ID extraction is agreed; the description-retrieval method and code architecture have not been selected.
 
 ## 6. Reading the correct posting
 
@@ -218,7 +264,7 @@ The proposed organization is:
 
 - A short `AGENTS.md` that directs Codex to the workflow and requests delegation.
 - A detailed Markdown rules file.
-- Persistent local screening history and result files.
+- A local database for persistent screening history and files for exported results.
 
 These files are proposals; this summary does not create or activate that setup.
 
@@ -253,12 +299,13 @@ Internal history should retain decisions for rejected jobs as well. Whether to e
 
 ## 10. Remaining decisions
 
-1. What to do when no employer job ID can be established.
+1. What to do when no posting ID can be extracted from the employer URL, or URL ID components conflict.
 2. Whether to retry previously unreadable postings on later runs.
 3. Final output format, columns, and Google Sheets transfer method.
 4. Output append/replace behavior and any application-tracking fields.
 5. Exact tool setup for retrieving employer postings and handling necessary browser rendering.
 6. Subagent concurrency and any per-posting effort limit beyond the agreed one retry.
+7. Local database technology, exact schema, access mechanism, and company-name normalization details.
 
 No graduation date, personal work-authorization timeline, or broader experience-based eligibility filter was established. The agreed title and explicit-restriction rules govern the intended first version.
 
